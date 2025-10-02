@@ -56,3 +56,34 @@ def obter_tempo_restante_e_taxas(driver):
         print('Taxas atuais por 1 diamante:')
         for rec, taxa in taxas.items():
             print(f'{rec}: {taxa:.2e}') # Mostra a notação científica
+
+        # Clique em mais informações para exibir
+        WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Mais Informações')]"))) # Ajuste texto/XPath
+        driver.find_element(By.XPATH, "//button[contains(text(), 'Mais Informações')]").click()
+
+        # Extrai o elemento temporizador (após o click, assume que aparece em um novo elemento: ajustar XPath)
+        elemento_temporizador = WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.ID, "timer-info"))) # Ajuste elemento ID/XPATH para o elemento com o tempo
+        texto_temporizador = elemento_temporizador.text.strip()
+
+        # Parseia o tempo (ex: 'Atualiza em 5 minutos' - ajuste regex conforme o formato exato)
+        correspondencia = re.search(r'(\d+)\s*(minuto|minutos|hora|horas)', texto_temporizador)
+        if correspondencia:
+            valor_tempo = int(correspondencia.group(1))
+            unidade = correspondencia.group(2).lower()
+            if 'hora' in unidade:
+                segundos_restantes = valor_tempo * 3600
+            else:
+                segundos_restantes = valor_tempo * 60
+            print(f'Tempo restante para atualização: {segundos_restantes} segundos')
+            return segundos_restantes, taxas
+        else:
+            print(f'Tempo restante para atualização: {segundos_restantes} segundos.')
+            return TEMPO_PADRAO_ESPERA_SEGUNDOS, taxas
+    except (NoSuchElementException, TimeoutException):
+        print('Não conseguiu extrair tempo ou taxas. Usando wait padrão.')
+        return TEMPO_PADRAO_ESPERA_SEGUNDOS, {}
+
+def efetuar_troca(driver, recurso, quantidade):
+    try:
+        # Clique no botão HQ para dar um refresh no mapa (ajuste o XPath)
+        WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'HQ"))) # Ajuste texto/XPath
