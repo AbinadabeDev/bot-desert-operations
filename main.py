@@ -3,9 +3,11 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import NoSuchElementException, TimeoutException, StaleElementReferenceException
 import time
 import logging
+import locale
 
 # ============================
 # CONFIGURAÇÕES
@@ -110,6 +112,40 @@ def fechar_lightbox(driver):
             logger.error("Falha crítica ao tentar retornar ao 'game-frame'")
 
 
+def atualizar_cambio_via_hq(driver):
+    """Fecha a janela de troca, clica em HQ para atualizar e reabre a janela de troca."""
+    try:
+        logger.info("🚀 Iniciando atualização completa das taxas de câmbio via HQ...")
+
+        # ETAPA 1: Fecha a janela de troca atual
+        logger.info("Fechando a janela de troca...")
+        fechar_lightbox(driver)  # Isso nos devolve ao 'game-frame'
+
+        # ETAPA 2: Clica no botão HQ no menu principal
+        logger.info("Navegando para o Quartel-General (HQ) para forçar a atualização...")
+        hq_button = WebDriverWait(driver, 15).until(
+            EC.element_to_be_clickable((By.ID, "menu_hq"))
+        )
+        hq_button.click()
+
+        # Pequena pausa para garantir que a atualização do estado do jogo seja processada
+        time.sleep(2)
+        logger.info("Refresh via HQ concluído.")
+
+        # ETAPA 3: Reabre a janela de troca de recursos
+        logger.info("Retornando para a tela de troca de recursos...")
+        if not navegar_para_troca_recursos(driver):
+            logger.error("Falha ao retornar para a tela de troca após atualização.")
+            return False
+
+        logger.info("✅ Atualização completa concluída. Novas taxas carregadas.")
+        return True
+
+    except Exception as e:
+        logger.error(f"Ocorreu um erro durante a atualização via HQ: {e}")
+        return False
+
+
 def navegar_para_troca_recursos(driver):
     """Navega para Premium > Troca de Recursos (com iframes aninhados). Retorna True se bem-sucedido."""
     try:
@@ -159,6 +195,7 @@ def navegar_para_troca_recursos(driver):
         logger.error(f"Erro inesperado ao navegar para troca de recursos: {e}")
         return False
 
+
 def obter_valor_slider(driver, recurso, max_retries=3):
     """Obtém o valor atual do slider com retry."""
     for _ in range(max_retries):
@@ -170,43 +207,63 @@ def obter_valor_slider(driver, recurso, max_retries=3):
     raise Exception(f"Não foi possível obter valor do slider para {recurso}")
 
 
-def ajustar_slider(driver, recurso, quantidade_alvo, delay_clique=0.1):
-    """Ajusta o slider para a quantidade alvo. Retorna True se bem-sucedido."""
-    try:
-        seta_direita = driver.find_element(By.XPATH, XPATHS_RECURSOS[recurso]["increase"])
-        seta_esquerda = driver.find_element(By.XPATH, XPATHS_RECURSOS[recurso]["decrease"])
+def formatar_segundos(total_segundos):
+    """Converte um total de segundos para o formato HH:MM:SS."""
+    if total_segundos < 0:
+        return "00:00:00"
+    horas, rem = divmod(total_segundos, 3600)
+    minutos, segundos = divmod(rem, 60)
+    return f"{int(horas):02d}:{int(minutos):02d}:{int(segundos):02d}"
 
-        quantidade_atual = obter_valor_slider(driver, recurso)
+
+def ajustar_slider(driver, recurso, quantidade_alvo):
+    """Ajusta o slider para a quantidade alvo usando as setas do teclado."""
+    try:
+        # Mapeia o nome do recurso para o ID do slider
+        recurso_id_map = {
+            "Dinheiro": "Money", "Ouro": "Gold", "Munição": "Ammunition",
+            "Diesel": "Diesel", "Querosene": "Cerosin"
+        }
+        recurso_suffix = recurso_id_map[recurso]
+        slider_id = f"playzoSliderDiaExchange{recurso_suffix}"
+        span_id = f"sliderCountDiaExchange{recurso_suffix}"
+
+        # Localiza o pino do slider (o elemento que recebe o foco do teclado)
+        slider_handle = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, f"#{slider_id} .playzo-slider-button"))
+        )
+
+        # Pega o valor atual do slider lendo o span
+        valor_atual_str = driver.find_element(By.ID, span_id).text
+        quantidade_atual = int(valor_atual_str.replace('.', ''))
+
         diferenca = quantidade_alvo - quantidade_atual
 
         if diferenca == 0:
-            logger.info(f"Slider já está em {quantidade_alvo}")
+            logger.info(f"Slider de {recurso} já está em {quantidade_alvo}.")
             return True
 
-        seta = seta_direita if diferenca > 0 else seta_esquerda
-        cliques_necessarios = abs(diferenca)
+        logger.info(f"Ajustando slider de {recurso} de {quantidade_atual} para {quantidade_alvo} (usando teclado)...")
 
-        logger.info(f"Ajustando slider de {quantidade_atual} para {quantidade_alvo} ({cliques_necessarios} cliques)")
+        # Escolhe a tecla a ser pressionada
+        tecla = Keys.ARROW_RIGHT if diferenca > 0 else Keys.ARROW_LEFT
 
-        for i in range(cliques_necessarios):
-            seta.click()
-            time.sleep(delay_clique)
-            if i % 50 == 0 and i > 0:
-                logger.info(f"Progresso: {i}/{cliques_necessarios} cliques")
+        # Envia a tecla o número de vezes necessário de forma eficiente
+        slider_handle.send_keys(tecla * abs(diferenca))
 
-        # Verificar valor final
-        time.sleep(0.5)
-        valor_final = obter_valor_slider(driver, recurso)
-
-        if valor_final == quantidade_alvo:
-            logger.info(f"✅ Slider ajustado corretamente para {quantidade_alvo}")
+        # Validação final
+        time.sleep(0.5)  # Pequena espera para a UI atualizar
+        valor_final_str = driver.find_element(By.ID, span_id).text
+        if int(valor_final_str) == quantidade_alvo:
+            logger.info("✅ Slider ajustado com sucesso!")
             return True
         else:
-            logger.warning(f"⚠️ Valor final ({valor_final}) difere do alvo ({quantidade_alvo})")
+            logger.warning(
+                f"⚠️ O valor do slider ({valor_final_str}) não corresponde ao alvo ({quantidade_alvo}). A interface pode estar lenta.")
             return False
 
     except Exception as e:
-        logger.error(f"Erro ao ajustar slider: {e}")
+        logger.error(f"Erro ao ajustar slider com teclado: {e}")
         return False
 
 
@@ -214,11 +271,10 @@ def ajustar_slider(driver, recurso, quantidade_alvo, delay_clique=0.1):
 # FUNÇÕES PRINCIPAIS
 # ============================
 
-def obter_saldo_diamantes(driver):
+def obter_saldo_diamantes(driver, fechar_ao_final=True):
     """Obtém o saldo de diamantes de forma eficiente, lendo o atributo 'max' do slider."""
     try:
         logger.info("Obtendo saldo de diamantes (método eficiente)...")
-
         if not navegar_para_troca_recursos(driver):
             return 0
 
@@ -226,123 +282,107 @@ def obter_saldo_diamantes(driver):
         slider_container = WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.ID, "playzoSliderDiaExchangeMoney"))
         )
-
         # Pega o valor do atributo 'max', que é o total de diamantes
         saldo_diamantes_str = slider_container.get_attribute("max")
+        saldo_diamantes = int(saldo_diamantes_str) if saldo_diamantes_str and saldo_diamantes_str.isdigit() else 0
 
-        if saldo_diamantes_str and saldo_diamantes_str.isdigit():
-            saldo_diamantes = int(saldo_diamantes_str)
-            logger.info(f"💎 Saldo de diamantes encontrado: {saldo_diamantes}")
-        else:
-            logger.warning("Não foi possível ler o atributo 'max' do slider. Retornando 0.")
-            saldo_diamantes = 0
-
-        fechar_lightbox(driver)
+        if fechar_ao_final:
+            fechar_lightbox(driver)
         return saldo_diamantes
-
     except Exception as e:
         logger.error(f"Erro ao obter saldo de diamantes: {e}")
-        try:
-            fechar_lightbox(driver)
-        except:
-            pass
+        if fechar_ao_final:
+            try:
+                fechar_lightbox(driver)
+            except:
+                pass
         return 0
 
 
-def obter_tempo_restante_e_taxas(driver):
-    """Obtém o tempo restante e as taxas atuais."""
+def obter_dados_da_tela(driver):
+    """Obtém as taxas e o tempo da tela de troca ATUAL, gerenciando o estado do painel do timer."""
+    taxas = {}
+    for recurso in RECURSOS:
+        try:
+            elemento_valor = driver.find_element(By.XPATH, XPATHS_RECURSOS[recurso]["rate"])
+            valor_do_atributo = elemento_valor.get_attribute("title")
+            taxas[recurso] = parse_valor_limpo(valor_do_atributo)
+        except NoSuchElementException:
+            taxas[recurso] = 0.0
+
+    segundos_restantes = 0
     try:
-        if not navegar_para_troca_recursos(driver):
-            return TEMPO_PADRAO_ESPERA_SEGUNDOS, {}
+        # Verifica se o painel do gráfico já está visível
+        graph_panel = driver.find_element(By.ID, "premiumGraph")
+        if not graph_panel.is_displayed():
+            logger.info("Painel de informações não está visível. Abrindo...")
+            botao_grafico = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.ID, "showAccountValueGraph")))
+            driver.execute_script("arguments[0].click();", botao_grafico)
+            WebDriverWait(driver, 5).until(EC.visibility_of(graph_panel))  # Espera o painel aparecer
 
-        # Obter taxas
-        taxas = {}
-        for recurso in RECURSOS:
-            try:
-                elemento_valor = driver.find_element(By.XPATH, XPATHS_RECURSOS[recurso]["rate"])
-                valor_do_atributo = elemento_valor.get_attribute("title")
-                taxas[recurso] = parse_valor_limpo(valor_do_atributo)
+        # Agora que o painel está garantidamente visível, lemos o timer
+        elemento_temporizador = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.XPATH, "//span[contains(@class, 'calculation-countdown')]")))
+        WebDriverWait(driver, 10).until(lambda d: elemento_temporizador.text.strip() != "-")
 
-            except NoSuchElementException:
-                logger.warning(f"Não foi possível obter taxa para {recurso}")
-                taxas[recurso] = 0.0
+        future_timestamp = int(elemento_temporizador.get_attribute('data-countdown'))
+        current_timestamp = int(time.time())
+        segundos_restantes = future_timestamp - current_timestamp
+    except Exception:
+        logger.warning("Não foi possível obter o timer na atualização.")
 
-        logger.info("📊 Taxas atuais por 1 diamante:")
-        for rec, taxa in taxas.items():
-            logger.info(f"  {rec}: {taxa:.2e}")
-
-        # Tentar obter temporizador
-        segundos_restantes = TEMPO_PADRAO_ESPERA_SEGUNDOS
-        try:
-            botao_grafico = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((By.XPATH, "//*[@id='showAccountValueGraph']"))
-            )
-            botao_grafico.click()
-
-            elemento_temporizador = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'calculation-countdown')]"))
-            )
-            segundos_restantes_str = elemento_temporizador.get_attribute('data-countdown')
-            if segundos_restantes_str and segundos_restantes_str.isdigit():
-                segundos_restantes = int(segundos_restantes_str)
-                logger.info(f"⏱️ Tempo restante: {segundos_restantes} segundos")
-        except (NoSuchElementException, TimeoutException):
-            logger.warning("Não foi possível obter temporizador. Usando tempo padrão.")
-
-        fechar_lightbox(driver)
-        return segundos_restantes, taxas
-
-    except Exception as e:
-        logger.error(f"Erro ao obter tempo/taxas: {e}")
-        try:
-            fechar_lightbox(driver)
-        except:
-            pass
-        return TEMPO_PADRAO_ESPERA_SEGUNDOS, {}
+    return taxas, segundos_restantes
 
 
-def efetuar_troca(driver, recurso, quantidade):
-    """Realiza a troca de diamantes por recursos."""
+def efetuar_troca_na_tela(driver, recurso, quantidade):
+    """Realiza a troca na tela atual, incluindo a confirmação e o fechamento da caixa de sucesso."""
     try:
         logger.info(f"🔄 Iniciando troca: {quantidade} diamantes por {recurso}")
 
-        # Ir para HQ primeiro para resetar estado
-        try:
-            driver.switch_to.default_content()
-            driver.switch_to.frame("game-frame")
-            WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, "//*[@id='menu_hq']"))
-            ).click()
-            time.sleep(2)
-        except:
-            logger.warning("Não foi possível clicar em HQ, continuando...")
-
-        if not navegar_para_troca_recursos(driver):
-            logger.error("Falha ao navegar para troca de recursos")
-            return False
-
-        # Ajustar slider
         if not ajustar_slider(driver, recurso, int(quantidade)):
-            logger.error("Falha ao ajustar slider. Cancelando troca.")
-            fechar_lightbox(driver)
+            logger.error("Falha ao ajustar slider.")
             return False
 
-        # Confirmar troca
         botao_troca = driver.find_element(By.XPATH, XPATHS_RECURSOS[recurso]["exchange"])
         botao_troca.click()
 
-        logger.info(f"✅ Troca realizada: {quantidade} diamantes → {recurso}")
-        time.sleep(2)
+        WebDriverWait(driver, 10).until(EC.visibility_of_element_located((By.ID, "messageBoxOverlay")))
+        logger.info("Caixa de diálogo de confirmação detectada.")
 
-        fechar_lightbox(driver)
-        return True
+        while True:
+            confirmacao = input("👉 Confirmar troca? [1] Sim, [0 ou 00] Não: ").strip()
+            if confirmacao == '1':
+                logger.info("Confirmando a troca...")
+                ok_button = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.ID, "messageBoxLeftButton")))
+                ok_button.click()
+
+                # ETAPA 5: Aguarda a caixa de SUCESSO e clica em "Fechar"
+                logger.info("Aguardando confirmação de sucesso...")
+                fechar_button = WebDriverWait(driver, 10).until(
+                    EC.element_to_be_clickable((By.CSS_SELECTOR, "#messageBoxAlertButton .button"))
+                )
+                logger.info("✅ TROCA FOI BEM-SUCEDIDA!")
+                fechar_button.click()
+
+                resultado_final = True
+                break
+            elif confirmacao in ['0', '00']:
+                logger.info("Cancelando a troca...")
+                cancel_button = WebDriverWait(driver, 10).until(
+                    EC.element_to_be_clickable((By.ID, "messageBoxRightButton")))
+                cancel_button.click()
+                resultado_final = False
+                break
+            else:
+                print("❌ Opção inválida. Por favor, digite 1 para Sim ou 0 para Não.")
+
+        # ETAPA 6: Aguarda a caixa de diálogo geral desaparecer
+        WebDriverWait(driver, 10).until(EC.invisibility_of_element_located((By.ID, "messageBoxOverlay")))
+
+        return resultado_final
 
     except Exception as e:
         logger.error(f"Erro ao realizar troca: {e}")
-        try:
-            fechar_lightbox(driver)
-        except:
-            pass
         return False
 
 
@@ -374,92 +414,102 @@ def validar_entrada_numerica(prompt, minimo=1, maximo=None):
 # ============================
 
 def principal():
+    try:
+        locale.setlocale(locale.LC_ALL, 'pt_BR.UTF-8')
+    except locale.Error:
+        logger.warning("Locale 'pt_BR.UTF-8' não encontrado. Usando formatação padrão.")
+
     logger.info('=' * 50)
-    logger.info('🤖 BOT DESERT OPERATIONS - TROCA DE RECURSOS')
+    logger.info('🤖 BOT DESERT OPERATIONS - ASSISTENTE DE TROCAS')
     logger.info('=' * 50)
 
     opcoes = webdriver.ChromeOptions()
-    # opcoes.add_argument("--headless")  # Descomente para modo headless
+    opcoes.add_argument('--log-level=3')
+    opcoes.add_experimental_option('excludeSwitches', ['enable-logging'])
     driver = webdriver.Chrome(options=opcoes)
 
     try:
         driver.get(URL_JOGO)
-        input("\n⏸️  Faça login manualmente e pressione ENTER quando estiver pronto...\n")
-        time.sleep(5)
+        input("\n⏸️  Faça login manualmente e pressione ENTER quando estiver na tela do jogo...\n")
 
-        # Entrar no iframe principal
-        try:
-            logger.info("Mudando para iframe 'game-frame'...")
-            WebDriverWait(driver, 20).until(
-                EC.frame_to_be_available_and_switch_to_it((By.ID, "game-frame"))
-            )
-            logger.info("✅ Contexto mudado para 'game-frame'")
-        except TimeoutException:
-            logger.error("❌ ERRO CRÍTICO: Não foi possível encontrar iframe 'game-frame'")
+        saldo_diamantes = obter_saldo_diamantes(driver, fechar_ao_final=False)
+        if saldo_diamantes == 0:
+            logger.error("Não foi possível obter o saldo de diamantes. Encerrando.")
             return
 
-        # Loop principal
         while True:
-            try:
-                logger.info("\n" + "=" * 50)
-                logger.info("🔄 Iniciando novo ciclo de monitoramento")
-                logger.info("=" * 50)
+            taxas_atuais, segundos_restantes = obter_dados_da_tela(driver)
 
-                # Obter saldo
-                saldo_diamantes = obter_saldo_diamantes(driver)
-                logger.info(f"💎 Saldo atual: {saldo_diamantes} diamantes")
+            print("\n" + "=" * 50)
+            logger.info(f"💎 Saldo de Diamantes: {saldo_diamantes:n}")
+            logger.info(f"⏱️  Tempo para atualização: {formatar_segundos(segundos_restantes)}")
+            print("-" * 50)
+            logger.info("📊 Taxas Atuais por 1 Diamante:")
+            for i, recurso in enumerate(RECURSOS):
+                taxa = taxas_atuais.get(recurso, 0.0)
+                print(f"  [{i + 1}] {recurso}: {int(taxa):n}  (Notação: {taxa:.2e})")
+            print("-" * 50)
 
-                # Obter taxas e tempo
-                tempo_espera, taxas_atuais = obter_tempo_restante_e_taxas(driver)
+            # MENU ATUALIZADO
+            print("Escolha uma opção:")
+            print(f"  [{len(RECURSOS) + 1}] Atualizar Dados da Tela (Rápido)")
+            print(f"  [{len(RECURSOS) + 2}] ATUALIZAR CÂMBIO VIA HQ (Completo)")
+            print(f"  [{len(RECURSOS) + 3}] Sair")
 
-                if tempo_espera > 0:
-                    logger.info(f"⏱️  Aguardando {tempo_espera + 10}s para próxima atualização...")
-                    time.sleep(tempo_espera + 10)
+            escolha = input("👉 Digite o número da sua escolha: ").strip()
 
-                # Obter taxas atualizadas
-                _, taxas_atualizadas = obter_tempo_restante_e_taxas(driver)
+            if not escolha.isdigit():
+                print("❌ Opção inválida. Por favor, digite um número.")
+                time.sleep(2)
+                continue
 
-                # Perguntar sobre troca
-                print("\n" + "=" * 50)
-                confirmar = input("💬 Deseja realizar uma troca? (sim/nao): ").strip().lower()
+            escolha_num = int(escolha)
 
-                if confirmar in ['sim', 's', 'yes', 'y']:
-                    print(f"\n📦 Recursos disponíveis: {', '.join(RECURSOS)}")
-                    recurso = input("Escolha o recurso: ").strip()
-
-                    if recurso not in RECURSOS:
-                        logger.warning("❌ Recurso inválido")
-                        continue
-
-                    quantidade = validar_entrada_numerica(
-                        f"💎 Digite a quantidade de diamantes (1-{saldo_diamantes}): ",
-                        minimo=1,
-                        maximo=saldo_diamantes
-                    )
-
-                    if quantidade is None:
-                        logger.info("Troca cancelada")
-                        continue
-
-                    if efetuar_troca(driver, recurso, quantidade):
-                        logger.info("✅ Troca concluída com sucesso!")
-                        saldo_diamantes -= quantidade
-                    else:
-                        logger.error("❌ Falha na troca")
-                else:
-                    logger.info("Continuando monitoramento...")
-
-                time.sleep(60)
-
-            except KeyboardInterrupt:
-                logger.info("\n⏹️  Interrompido pelo usuário")
+            # Opção de SAIR
+            if escolha_num == len(RECURSOS) + 3:
+                logger.info("Saindo...")
                 break
-            except Exception as e:
-                logger.error(f"Erro no loop principal: {e}")
-                time.sleep(30)
+
+            # Opção de ATUALIZAR CÂMBIO VIA HQ
+            elif escolha_num == len(RECURSOS) + 2:
+                atualizar_cambio_via_hq(driver)
+                # O loop continuará e coletará/exibirá os novos dados automaticamente
+                continue
+
+            # Opção de ATUALIZAR DADOS (Rápido)
+            elif escolha_num == len(RECURSOS) + 1:
+                logger.info("Atualizando dados da tela...")
+                continue
+
+            # Opções de TROCA
+            elif 1 <= escolha_num <= len(RECURSOS):
+                recurso_escolhido = RECURSOS[escolha_num - 1]
+
+                quantidade = validar_entrada_numerica(
+                    f"💎 Digite a quantidade de diamantes para trocar por {recurso_escolhido} (1-{saldo_diamantes}): ",
+                    minimo=1,
+                    maximo=saldo_diamantes
+                )
+
+                if quantidade is not None:
+                    if efetuar_troca_na_tela(driver, recurso_escolhido, quantidade):
+                        saldo_diamantes -= quantidade
+                    # O log de sucesso/falha já está na outra função
+                else:
+                    logger.info("Troca cancelada.")
+
+                input("\nPressione ENTER para voltar ao menu...")
+
+            else:
+                print("❌ Opção inválida.")
+                time.sleep(2)
 
     finally:
         logger.info("🔴 Encerrando bot...")
+        try:
+            fechar_lightbox(driver)
+        except Exception:
+            pass
         driver.quit()
 
 
