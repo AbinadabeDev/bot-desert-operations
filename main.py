@@ -181,7 +181,7 @@ def validar_entrada_numerica(prompt, minimo=1, maximo=None):
 
             # --- A CORREÇÃO ESTÁ AQUI ---
             # Remove os pontos da string antes de converter para inteiro.
-            entrada_sem_pontos = entrada.replace('.', ' ')
+            entrada_sem_pontos = entrada.replace('.', '')
 
             valor_int = int(entrada_sem_pontos)
 
