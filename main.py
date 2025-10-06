@@ -25,9 +25,13 @@ Principais Funcionalidades:
 import time
 import logging
 import locale
+import random
+import threading
+import queue
 
 # Importações específicas do Selenium
 from selenium import webdriver
+from selenium.webdriver import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -75,6 +79,57 @@ for recurso in RECURSOS:
 # FUNÇÕES UTILITÁRIAS
 # ============================
 
+def esperar_pelo_texto_do_timer(driver):
+    """
+    Uma condição de espera personalizada para o WebDriverWait.
+
+    Aguarda até que o elemento do timer esteja presente e seu texto contenha
+    uma unidade de tempo ('h', 'm', ou 's'), indicando que foi carregado.
+
+    Retorna o elemento quando a condição é satisfeita, ou False caso contrário.
+    """
+    try:
+        # Localiza o elemento do timer a cada verificação
+        element = driver.find_element(By.XPATH, "//span[contains(@class, 'calculation-countdown')]")
+
+        # Verifica se o texto é válido (não vazio, não "-", e contém uma unidade de tempo)
+        texto = element.text.lower()
+        if texto and texto.strip() != '-' and ('h' in texto or 'm' in texto or 's' in texto):
+            return element  # Retorna o próprio elemento em caso de sucesso
+        return False
+    except NoSuchElementException:
+        return False
+
+
+def parse_tempo_para_segundos(texto_tempo):
+    """
+    Converte uma string de tempo (ex: '25m 10s') para um total de segundos,
+    de forma mais robusta.
+    """
+    if not isinstance(texto_tempo, str):
+        return 0
+
+    total_segundos = 0
+    # Garante que o texto esteja em minúsculas e remove espaços extras
+    partes = texto_tempo.strip().lower().split(' ')
+
+    for parte in partes:
+        try:
+            if 'h' in parte:
+                # Remove o 'h' e converte para número
+                total_segundos += int(parte.replace('h', '')) * 3600
+            elif 'm' in parte:
+                total_segundos += int(parte.replace('m', '')) * 60
+            elif 's' in parte:
+                total_segundos += int(parte.replace('s', ''))
+        except (ValueError, TypeError):
+            # Se uma parte não puder ser convertida (ex: ''), ignora e continua
+            logger.warning(f"Não foi possível interpretar a parte do tempo: '{parte}'")
+            continue
+
+    return total_segundos
+
+
 def parse_valor_limpo(valor_str):
     """
     Converte uma string numérica formatada em um valor float.
@@ -89,6 +144,7 @@ def parse_valor_limpo(valor_str):
         float: O valor numérico convertido. Retorna 0.0 em caso de erro.
     """
     try:
+        # Remove os pontos (separador de milhar) antes de converter.
         valor_limpo = valor_str.replace('.', '')
         return float(valor_limpo)
     except (ValueError, TypeError) as e:
@@ -147,6 +203,37 @@ def validar_entrada_numerica(prompt, minimo=1, maximo=None):
 # ============================
 # FUNÇÕES DE INTERAÇÃO (Selenium)
 # ============================
+
+
+def fechar_lightbox(driver):
+    """Fecha um pop-up (lightbox) e retorna o foco do driver para o iframe principal do jogo."""
+    try:
+        # Tenta clicar no botão de fechar primeiro (espera curta)
+        botao_fechar = WebDriverWait(driver, 2).until(
+            EC.element_to_be_clickable((By.ID, "lightBoxClose"))
+        )
+        botao_fechar.click()
+        logger.info("Lightbox temporário fechado via botão na aba principal.")
+    except Exception:
+        # Se falhar, tenta uma abordagem alternativa enviando a tecla ESCAPE
+        try:
+            logger.warning("Não foi possível fechar via botão, tentando com a tecla ESCAPE.")
+            ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+            logger.info("Comando ESCAPE enviado para fechar o lightbox.")
+        except Exception as e2:
+            logger.error(f"Falha ao tentar fechar o lightbox com ESCAPE: {e2}")
+
+
+def user_input_thread(command_queue):
+    """
+    Executada em uma thread separada para capturar a entrada do usuário
+    sem bloquear a thread principal.
+    """
+    while True:
+        # Esta chamada bloqueia apenas esta thread, não a principal.
+        entrada = input(">>> Digite o número da sua escolha: ").strip()
+        command_queue.put(entrada)
+
 
 def navegar_para_troca_recursos(driver):
     """
@@ -208,31 +295,48 @@ def navegar_para_troca_recursos(driver):
 
 def abrir_e_focar_aba_premium(driver):
     """
-    Abre a tela de troca de recursos em uma nova aba e move o foco do driver para ela.
-
-    Args:
-        driver (webdriver): A instância do navegador Selenium.
-
-    Returns:
-        str or None: O handle da aba original do jogo, ou None em caso de falha.
+    Captura a URL do conteúdo premium, abre em uma nova aba, e move o foco do driver.
     """
     try:
-        logger.info("Iniciando o processo de abertura da aba premium...")
-        # Salva o identificador da aba original (mapa do jogo)
+        logger.info("Iniciando o processo de abertura da aba premium (Método de Captura de URL)...")
         aba_original = driver.current_window_handle
 
-        # Constrói a URL direta para a troca de recursos.
-        # Isso evita a necessidade de clicar em múltiplos menus.
-        url_base = "/".join(driver.current_url.split("/")[:-1])
-        url_premium = f"{url_base}/premium_cash.php?section=ress"
+        # ETAPA 1: Entra no iframe e clica em 'Premium' para fazer o lightbox aparecer
+        driver.switch_to.default_content()
+        WebDriverWait(driver, 15).until(
+            EC.frame_to_be_available_and_switch_to_it((By.ID, "game-frame"))
+        )
+        botao_premium = WebDriverWait(driver, 15).until(
+            EC.element_to_be_clickable((By.ID, "menu_premium"))
+        )
+        botao_premium.click()
 
-        # Abre a URL em uma nova aba
+        # ETAPA 2: 'Espiona' o iframe que acabou de aparecer e captura sua URL (src)
+        logger.info("Aguardando e capturando a URL do iframe premium...")
+        iframe_premium = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.ID, "lightBoxFrame"))
+        )
+        url_premium_capturada = iframe_premium.get_attribute('src')
+
+        if not url_premium_capturada:
+            logger.error("Não foi possível capturar a URL do iframe.")
+            return None
+
+        # ETAPA 3: Limpa a tela original fechando o lightbox que foi aberto
+        fechar_lightbox(driver)
+        driver.switch_to.default_content()  # Garante que o foco está no topo
+
+        # ETAPA 4: Abre a URL capturada em uma nova aba
         driver.switch_to.new_window('tab')
-        driver.get(url_premium)
+        driver.get(url_premium_capturada)
+        logger.info(f"Nova aba aberta com a URL capturada: {url_premium_capturada}")
 
-        logger.info(f"Nova aba aberta com sucesso no endereço: {url_premium}")
+        # ETAPA 5: Na nova aba, navega para a tela final de 'Troca de Recursos'
+        resource_button = WebDriverWait(driver, 15).until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, "a[href*='premium_cash.php?section=ress']"))
+        )
+        resource_button.click()
 
-        # Valida se a nova aba carregou corretamente
         WebDriverWait(driver, 20).until(
             EC.presence_of_element_located((By.XPATH, "//img[@title='Dinheiro']"))
         )
@@ -413,15 +517,7 @@ def obter_saldo_diamantes(driver):
 def obter_dados_da_tela(driver):
     """
     Coleta todas as informações dinâmicas da tela de troca de recursos.
-
-    Isso inclui as taxas de câmbio de todos os recursos e o tempo restante
-    no contador de atualização.
-
-    Args:
-        driver (webdriver): A instância do navegador Selenium.
-
-    Returns:
-        tuple: Uma tupla contendo um dicionário de taxas e os segundos restantes.
+    Usa uma espera inteligente para garantir a captura correta do timer.
     """
     taxas = {}
     for recurso in RECURSOS:
@@ -440,14 +536,16 @@ def obter_dados_da_tela(driver):
             driver.execute_script("arguments[0].click();", botao_grafico)
             WebDriverWait(driver, 5).until(EC.visibility_of(graph_panel))
 
-        elemento_temporizador = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.XPATH, "//span[contains(@class, 'calculation-countdown')]"))
-        )
-        WebDriverWait(driver, 10).until(lambda d: elemento_temporizador.text.strip() != "-")
+        # --- MUDANÇA PRINCIPAL: Usa a nova função de espera inteligente ---
+        # Esta linha substitui as duas esperas anteriores por uma única e mais robusta.
+        logger.info("Aguardando o valor final do timer ser carregado...")
+        elemento_temporizador = WebDriverWait(driver, 15).until(esperar_pelo_texto_do_timer)
 
-        future_timestamp = int(elemento_temporizador.get_attribute('data-countdown'))
-        current_timestamp = int(time.time())
-        segundos_restantes = future_timestamp - current_timestamp
+        texto_do_timer = elemento_temporizador.text
+        logger.info(f"Texto do timer capturado com sucesso: '{texto_do_timer}'")
+        segundos_restantes = parse_tempo_para_segundos(texto_do_timer)
+        # -----------------------------------------------------------------
+
     except Exception:
         logger.warning("Não foi possível obter o timer na atualização.")
 
@@ -498,7 +596,10 @@ def atualizar_cambio_via_hq(driver):
 # ============================
 
 def principal():
-    """Função principal que orquestra a execução do assistente de automação em uma aba dedicada."""
+    """
+    Função principal que orquestra a automação usando uma thread separada
+    para a entrada do usuário, permitindo refreshes automáticos não-interativos.
+    """
     try:
         locale.setlocale(locale.LC_ALL, 'pt_BR.UTF-8')
     except locale.Error:
@@ -518,77 +619,97 @@ def principal():
         driver.get(URL_JOGO)
         input("\n>>> Faça o login no jogo e pressione ENTER para iniciar o assistente...\n")
 
-        # Abre e foca na nova aba premium
         aba_original = abrir_e_focar_aba_premium(driver)
         if not aba_original:
             logger.error("Falha na inicialização. Encerrando.")
             return
 
-        # Loop interativo, agora operando exclusivamente na nova aba
+        command_queue = queue.Queue()
+        input_thread = threading.Thread(target=user_input_thread, args=(command_queue,), daemon=True)
+        input_thread.start()
+
+        # --- CORREÇÃO PRINCIPAL ESTÁ AQUI ---
+        # Envia um comando inicial para a fila para garantir que o painel seja exibido no início.
+        command_queue.put('show_panel')
+        # ------------------------------------
+
+        last_refresh_time = time.time()
+        refresh_interval = random.randint(12 * 60, 15 * 60)
+        logger.info(f"Refresh automático agendado para daqui a aproximadamente {refresh_interval // 60} minutos.")
+
         while True:
-            saldo_diamantes = obter_saldo_diamantes(driver)
-            taxas_atuais, segundos_restantes = obter_dados_da_tela(driver)
+            current_time = time.time()
+            if (current_time - last_refresh_time) > refresh_interval:
+                logger.info("=" * 50)
+                logger.info("TEMPO ESGOTADO! EXECUTANDO REFRESH AUTOMÁTICO...")
+                driver.refresh()
+                WebDriverWait(driver, 20).until(
+                    EC.presence_of_element_located((By.XPATH, "//img[@title='Dinheiro']"))
+                )
+                last_refresh_time = time.time()
+                refresh_interval = random.randint(12 * 60, 15 * 60)
+                logger.info(f"Refresh automático concluído. Próximo agendamento em ~{refresh_interval // 60} minutos.")
+                command_queue.put('show_panel')
 
-            print("\n" + "=" * 50)
-            logger.info(f"Saldo de Diamantes: {saldo_diamantes:n}")
-            logger.info(f"Tempo para Próxima Atualização: {formatar_segundos(segundos_restantes)}")
-            print("-" * 50)
-            logger.info("Taxas de Câmbio (por 1 Diamante):")
-            for i, recurso in enumerate(RECURSOS):
-                taxa = taxas_atuais.get(recurso, 0.0)
-                print(f"  [{i + 1}] {recurso}: {int(taxa):n}  (Notação: {taxa:.2e})")
-            print("-" * 50)
-
-            # Menu de ações atualizado
-            print("Escolha uma ação:")
-            print(f"  [{len(RECURSOS) + 1}] Atualizar Taxas (Recarregar Aba)")
-            print(f"  [{len(RECURSOS) + 2}] Sair")
-
-            escolha = input(">>> Digite o número da sua escolha: ").strip()
-
-            if not escolha.isdigit():
-                print("Entrada inválida. Tente novamente.")
-                time.sleep(2)
+            try:
+                command = command_queue.get_nowait()
+            except queue.Empty:
+                time.sleep(1)
                 continue
 
-            escolha_num = int(escolha)
+            # O comando 'show_panel' (ou qualquer comando inválido) fará o painel ser reimpresso
+            if command == 'show_panel' or not command.isdigit():
+                saldo_diamantes = obter_saldo_diamantes(driver)
+                taxas_atuais, segundos_restantes = obter_dados_da_tela(driver)
+
+                print("\n" + "=" * 50)
+                logger.info(f"Saldo de Diamantes: {saldo_diamantes:n}")
+                logger.info(f"Tempo para Próxima Atualização: {formatar_segundos(segundos_restantes)}")
+                print("-" * 50)
+                logger.info("Taxas de Câmbio (por 1 Diamante):")
+                for i, recurso in enumerate(RECURSOS):
+                    taxa = taxas_atuais.get(recurso, 0.0)
+                    print(f"  [{i + 1}] {recurso}: {int(taxa):n}  (Notação: {taxa:.2e})")
+                print("-" * 50)
+                print("Escolha uma ação:")
+                print(f"  [{len(RECURSOS) + 1}] Atualizar Taxas (Recarregar Aba Manualmente)")
+                print(f"  [{len(RECURSOS) + 2}] Sair")
+                continue
+
+            escolha_num = int(command)
 
             if escolha_num == len(RECURSOS) + 2:
                 logger.info("Encerrando o assistente...")
                 break
             elif escolha_num == len(RECURSOS) + 1:
-                logger.info("Recarregando a aba para atualizar as taxas...")
+                logger.info("Recarregando a aba manualmente para atualizar as taxas...")
                 driver.refresh()
-                # Valida o carregamento após o refresh
-                WebDriverWait(driver, 20).until(
-                    EC.presence_of_element_located((By.XPATH, "//img[@title='Dinheiro']"))
-                )
-                continue
+                WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.XPATH, "//img[@title='Dinheiro']")))
+                last_refresh_time = time.time()
+                command_queue.put('show_panel')
             elif 1 <= escolha_num <= len(RECURSOS):
+                saldo_diamantes = obter_saldo_diamantes(driver)
                 recurso_escolhido = RECURSOS[escolha_num - 1]
                 quantidade = validar_entrada_numerica(
                     f"Quantidade de diamantes para trocar por {recurso_escolhido} (Máx: {saldo_diamantes:n}): ",
-                    minimo=1,
-                    maximo=saldo_diamantes
+                    minimo=1, maximo=saldo_diamantes
                 )
                 if quantidade is not None:
                     efetuar_troca_na_tela(driver, recurso_escolhido, quantidade)
+                    last_refresh_time = time.time()
                 else:
                     logger.info("Operação de troca cancelada.")
-                input("\n>>> Pressione ENTER para voltar ao menu...")
-            else:
-                print("Opção inválida. Tente novamente.")
-                time.sleep(2)
+                command_queue.put('show_panel')
 
     finally:
         logger.info("Fechando o navegador.")
-        # Fecha apenas a aba do bot e retorna para a aba original antes de encerrar tudo
         if aba_original and len(driver.window_handles) > 1:
-            driver.close()  # Fecha a aba atual (do bot)
-            driver.switch_to.window(aba_original)
-
+            try:
+                driver.close()
+                driver.switch_to.window(aba_original)
+            except Exception:
+                pass
         driver.quit()
-
 
 if __name__ == "__main__":
     principal()
