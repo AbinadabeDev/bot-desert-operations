@@ -117,14 +117,7 @@ def formatar_segundos(total_segundos):
 def validar_entrada_numerica(prompt, minimo=1, maximo=None):
     """
     Solicita e valida uma entrada numérica do usuário dentro de um intervalo.
-
-    Args:
-        prompt (str): A mensagem a ser exibida para o usuário.
-        minimo (int): O valor mínimo aceitável.
-        maximo (int, optional): O valor máximo aceitável.
-
-    Returns:
-        int or None: O número validado, ou None se o usuário cancelar.
+    Agora lida com números formatados com pontos (ex: 1.000).
     """
     while True:
         try:
@@ -132,19 +125,23 @@ def validar_entrada_numerica(prompt, minimo=1, maximo=None):
             if entrada.lower() in ['sair', 'cancelar']:
                 return None
 
-            valor_int = int(entrada)
+            # --- A CORREÇÃO ESTÁ AQUI ---
+            # Remove os pontos da string antes de converter para inteiro.
+            entrada_sem_pontos = entrada.replace('.', ' ')
+
+            valor_int = int(entrada_sem_pontos)
 
             if valor_int < minimo:
-                print(f"Valor inválido. O mínimo é {minimo}.")
+                print(f"Valor inválido. O mínimo é {minimo:n}.")
                 continue
 
             if maximo is not None and valor_int > maximo:
-                print(f"Valor inválido. O máximo é {maximo}.")
+                print(f"Valor inválido. O máximo é {maximo:n}.")
                 continue
 
             return valor_int
         except ValueError:
-            print("Entrada inválida. Por favor, digite um número.")
+            print("Entrada inválida. Por favor, digite apenas números.")
 
 
 # ============================
@@ -207,6 +204,45 @@ def navegar_para_troca_recursos(driver):
     except Exception as e:
         logger.error(f"Erro inesperado durante a navegação: {e}")
         return False
+
+
+def abrir_e_focar_aba_premium(driver):
+    """
+    Abre a tela de troca de recursos em uma nova aba e move o foco do driver para ela.
+
+    Args:
+        driver (webdriver): A instância do navegador Selenium.
+
+    Returns:
+        str or None: O handle da aba original do jogo, ou None em caso de falha.
+    """
+    try:
+        logger.info("Iniciando o processo de abertura da aba premium...")
+        # Salva o identificador da aba original (mapa do jogo)
+        aba_original = driver.current_window_handle
+
+        # Constrói a URL direta para a troca de recursos.
+        # Isso evita a necessidade de clicar em múltiplos menus.
+        url_base = "/".join(driver.current_url.split("/")[:-1])
+        url_premium = f"{url_base}/premium_cash.php?section=ress"
+
+        # Abre a URL em uma nova aba
+        driver.switch_to.new_window('tab')
+        driver.get(url_premium)
+
+        logger.info(f"Nova aba aberta com sucesso no endereço: {url_premium}")
+
+        # Valida se a nova aba carregou corretamente
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.XPATH, "//img[@title='Dinheiro']"))
+        )
+        logger.info("Tela de Troca de Recursos carregada e validada na nova aba.")
+
+        return aba_original
+
+    except Exception as e:
+        logger.error(f"Não foi possível abrir ou focar na nova aba premium: {e}")
+        return None
 
 
 def fechar_lightbox(driver):
@@ -277,7 +313,7 @@ def ajustar_slider(driver, recurso, quantidade_alvo):
         # Valida se o valor foi alterado corretamente.
         time.sleep(0.5)  # Pausa para a interface gráfica atualizar.
         valor_final_str = driver.find_element(By.ID, span_id).text
-        if int(valor_final_str) == quantidade_alvo:
+        if int(valor_final_str.replace('.', '')) == quantidade_alvo:
             logger.info("Slider ajustado com sucesso.")
             return True
         else:
@@ -361,40 +397,16 @@ def efetuar_troca_na_tela(driver, recurso, quantidade):
 # FUNÇÕES DE LÓGICA DE NEGÓCIO
 # ============================
 
-def obter_saldo_diamantes(driver, fechar_ao_final=True):
-    """
-    Obtém o saldo total de diamantes do usuário de forma eficiente.
-
-    Em vez de interagir com o slider, esta função lê o atributo 'max'
-    diretamente do elemento HTML do slider, uma abordagem mais rápida e estável.
-
-    Args:
-        driver (webdriver): A instância do navegador Selenium.
-        fechar_ao_final (bool): Se True, fecha a janela de troca após a operação.
-
-    Returns:
-        int: O saldo de diamantes do usuário.
-    """
+def obter_saldo_diamantes(driver):
+    """Obtém o saldo de diamantes lendo o atributo 'max' do slider na aba atual."""
     try:
-        if not navegar_para_troca_recursos(driver):
-            return 0
-
         slider_container = WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.ID, "playzoSliderDiaExchangeMoney"))
         )
         saldo_diamantes_str = slider_container.get_attribute("max")
-        saldo_diamantes = int(saldo_diamantes_str) if saldo_diamantes_str and saldo_diamantes_str.isdigit() else 0
-
-        if fechar_ao_final:
-            fechar_lightbox(driver)
-        return saldo_diamantes
+        return int(saldo_diamantes_str) if saldo_diamantes_str and saldo_diamantes_str.isdigit() else 0
     except Exception as e:
-        logger.error(f"Não foi possível obter o saldo de diamantes: {e}")
-        if fechar_ao_final:
-            try:
-                fechar_lightbox(driver)
-            except:
-                pass
+        logger.error(f"Não foi possível obter o saldo de diamantes na aba premium: {e}")
         return 0
 
 
@@ -486,40 +498,37 @@ def atualizar_cambio_via_hq(driver):
 # ============================
 
 def principal():
-    """
-    Função principal que orquestra a execução do assistente de automação.
-    """
-    # Configura o locale para formatação numérica (ex: 1.000.000).
+    """Função principal que orquestra a execução do assistente de automação em uma aba dedicada."""
     try:
         locale.setlocale(locale.LC_ALL, 'pt_BR.UTF-8')
     except locale.Error:
         logger.warning("Locale 'pt_BR.UTF-8' não encontrado. Usando formatação padrão.")
 
     logger.info("=" * 50)
-    logger.info("ASSISTENTE DE TROCAS PARA DESERT OPERATIONS")
+    logger.info("ASSISTENTE DE TROCAS PARA DESERT OPERATIONS (MODO ABA DEDICADA)")
     logger.info("=" * 50)
 
-    # Configurações do WebDriver para um console mais limpo.
     opcoes = webdriver.ChromeOptions()
     opcoes.add_argument('--log-level=3')
     opcoes.add_experimental_option('excludeSwitches', ['enable-logging'])
     driver = webdriver.Chrome(options=opcoes)
+    aba_original = None
 
     try:
         driver.get(URL_JOGO)
         input("\n>>> Faça o login no jogo e pressione ENTER para iniciar o assistente...\n")
 
-        # Etapa inicial: obtém o saldo e navega para a tela de troca.
-        saldo_diamantes = obter_saldo_diamantes(driver, fechar_ao_final=False)
-        if saldo_diamantes == 0:
-            logger.error("Não foi possível obter o saldo de diamantes. Encerrando.")
+        # Abre e foca na nova aba premium
+        aba_original = abrir_e_focar_aba_premium(driver)
+        if not aba_original:
+            logger.error("Falha na inicialização. Encerrando.")
             return
 
-        # Loop principal da interface interativa.
+        # Loop interativo, agora operando exclusivamente na nova aba
         while True:
+            saldo_diamantes = obter_saldo_diamantes(driver)
             taxas_atuais, segundos_restantes = obter_dados_da_tela(driver)
 
-            # Exibe o painel de informações atualizadas.
             print("\n" + "=" * 50)
             logger.info(f"Saldo de Diamantes: {saldo_diamantes:n}")
             logger.info(f"Tempo para Próxima Atualização: {formatar_segundos(segundos_restantes)}")
@@ -530,11 +539,10 @@ def principal():
                 print(f"  [{i + 1}] {recurso}: {int(taxa):n}  (Notação: {taxa:.2e})")
             print("-" * 50)
 
-            # Exibe o menu de ações.
+            # Menu de ações atualizado
             print("Escolha uma ação:")
-            print(f"  [{len(RECURSOS) + 1}] Atualizar Dados (Rápido)")
-            print(f"  [{len(RECURSOS) + 2}] Atualizar Câmbio via HQ (Completo)")
-            print(f"  [{len(RECURSOS) + 3}] Sair")
+            print(f"  [{len(RECURSOS) + 1}] Atualizar Taxas (Recarregar Aba)")
+            print(f"  [{len(RECURSOS) + 2}] Sair")
 
             escolha = input(">>> Digite o número da sua escolha: ").strip()
 
@@ -545,14 +553,16 @@ def principal():
 
             escolha_num = int(escolha)
 
-            if escolha_num == len(RECURSOS) + 3:
+            if escolha_num == len(RECURSOS) + 2:
                 logger.info("Encerrando o assistente...")
                 break
-            elif escolha_num == len(RECURSOS) + 2:
-                atualizar_cambio_via_hq(driver)
-                continue
             elif escolha_num == len(RECURSOS) + 1:
-                logger.info("Atualizando dados da tela...")
+                logger.info("Recarregando a aba para atualizar as taxas...")
+                driver.refresh()
+                # Valida o carregamento após o refresh
+                WebDriverWait(driver, 20).until(
+                    EC.presence_of_element_located((By.XPATH, "//img[@title='Dinheiro']"))
+                )
                 continue
             elif 1 <= escolha_num <= len(RECURSOS):
                 recurso_escolhido = RECURSOS[escolha_num - 1]
@@ -562,8 +572,7 @@ def principal():
                     maximo=saldo_diamantes
                 )
                 if quantidade is not None:
-                    if efetuar_troca_na_tela(driver, recurso_escolhido, quantidade):
-                        saldo_diamantes -= quantidade  # Atualiza o saldo localmente.
+                    efetuar_troca_na_tela(driver, recurso_escolhido, quantidade)
                 else:
                     logger.info("Operação de troca cancelada.")
                 input("\n>>> Pressione ENTER para voltar ao menu...")
@@ -573,10 +582,11 @@ def principal():
 
     finally:
         logger.info("Fechando o navegador.")
-        try:
-            fechar_lightbox(driver)
-        except Exception:
-            pass
+        # Fecha apenas a aba do bot e retorna para a aba original antes de encerrar tudo
+        if aba_original and len(driver.window_handles) > 1:
+            driver.close()  # Fecha a aba atual (do bot)
+            driver.switch_to.window(aba_original)
+
         driver.quit()
 
 
