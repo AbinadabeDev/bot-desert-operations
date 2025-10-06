@@ -26,8 +26,6 @@ import time
 import logging
 import locale
 import random
-import threading
-import queue
 
 # Importações específicas do Selenium
 from selenium import webdriver
@@ -224,17 +222,6 @@ def fechar_lightbox(driver):
             logger.error(f"Falha ao tentar fechar o lightbox com ESCAPE: {e2}")
 
 
-def user_input_thread(command_queue):
-    """
-    Executada em uma thread separada para capturar a entrada do usuário
-    sem bloquear a thread principal.
-    """
-    while True:
-        # Esta chamada bloqueia apenas esta thread, não a principal.
-        entrada = input(">>> Digite o número da sua escolha: ").strip()
-        command_queue.put(entrada)
-
-
 def navegar_para_troca_recursos(driver):
     """
     Navega da tela principal do jogo até a interface de troca de recursos.
@@ -429,71 +416,40 @@ def ajustar_slider(driver, recurso, quantidade_alvo):
         return False
 
 
-def efetuar_troca_na_tela(driver, recurso, quantidade):
+def efetuar_troca_automatica(driver, recurso, quantidade):
     """
-    Executa o fluxo completo de uma troca na tela de recursos, incluindo as caixas de diálogo.
-
-    Args:
-        driver (webdriver): A instância do navegador Selenium.
-        recurso (str): O nome do recurso a ser trocado.
-        quantidade (int): A quantidade de diamantes a ser utilizada.
-
-    Returns:
-        bool: True se a troca for confirmada e bem-sucedida, False caso contrário.
+    Realiza a troca de forma totalmente automática, confirmando todas as etapas.
     """
     try:
+        logger.info(f"Iniciando troca automática: {quantidade} diamantes por {recurso}.")
+
         if not ajustar_slider(driver, recurso, int(quantidade)):
+            logger.error(f"Falha ao ajustar o slider para {recurso}.")
             return False
 
-        # Clica no botão "Troca" inicial.
-        botao_troca = driver.find_element(By.XPATH, XPATHS_RECURSOS[recurso]["exchange"])
-        botao_troca.click()
+        driver.find_element(By.XPATH, XPATHS_RECURSOS[recurso]["exchange"]).click()
 
-        # Aguarda a primeira caixa de diálogo (confirmação).
-        WebDriverWait(driver, 10).until(
-            EC.visibility_of_element_located((By.ID, "messageBoxOverlay"))
+        # Aguarda e clica no "OK" da primeira caixa de diálogo
+        ok_button = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.ID, "messageBoxLeftButton"))
         )
-        logger.info("Caixa de diálogo de confirmação exibida.")
+        ok_button.click()
 
-        # Solicita a confirmação do usuário.
-        while True:
-            confirmacao = input("Confirmar a troca? [1] Sim, [0] Não: ").strip()
-            if confirmacao == '1':
-                logger.info("Confirmando a troca...")
-                ok_button = WebDriverWait(driver, 10).until(
-                    EC.element_to_be_clickable((By.ID, "messageBoxLeftButton"))
-                )
-                ok_button.click()
+        # Aguarda e clica no "Fechar" da caixa de diálogo de sucesso
+        fechar_button = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, "#messageBoxAlertButton .button"))
+        )
+        fechar_button.click()
 
-                # Aguarda a segunda caixa de diálogo (sucesso) e a fecha.
-                logger.info("Aguardando confirmação de sucesso do servidor...")
-                fechar_button = WebDriverWait(driver, 10).until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, "#messageBoxAlertButton .button"))
-                )
-                logger.info("Troca realizada com sucesso!")
-                fechar_button.click()
-
-                resultado_final = True
-                break
-            elif confirmacao in ['0', '00']:
-                logger.info("Troca cancelada pelo usuário.")
-                cancel_button = WebDriverWait(driver, 10).until(
-                    EC.element_to_be_clickable((By.ID, "messageBoxRightButton"))
-                )
-                cancel_button.click()
-                resultado_final = False
-                break
-            else:
-                print("Opção inválida. Por favor, digite 1 para Sim ou 0 para Não.")
-
-        # Aguarda o desaparecimento do overlay da caixa de diálogo.
+        # Aguarda a finalização
         WebDriverWait(driver, 10).until(
             EC.invisibility_of_element_located((By.ID, "messageBoxOverlay"))
         )
-        return resultado_final
+        logger.info(f"Troca por {recurso} concluída com sucesso.")
+        return True
 
     except Exception as e:
-        logger.error(f"Ocorreu um erro durante a operação de troca: {e}")
+        logger.error(f"Ocorreu um erro durante a troca automática por {recurso}: {e}")
         return False
 
 
@@ -597,16 +553,16 @@ def atualizar_cambio_via_hq(driver):
 
 def principal():
     """
-    Função principal que orquestra a automação usando uma thread separada
-    para a entrada do usuário, permitindo refreshes automáticos não-interativos.
+    Função principal que orquestra o bot de forma totalmente autônoma,
+    operando em ciclos de espera e troca.
     """
     try:
         locale.setlocale(locale.LC_ALL, 'pt_BR.UTF-8')
     except locale.Error:
-        logger.warning("Locale 'pt_BR.UTF-8' não encontrado. Usando formatação padrão.")
+        logger.warning("Locale 'pt_BR.UTF-8' não encontrado.")
 
     logger.info("=" * 50)
-    logger.info("ASSISTENTE DE TROCAS PARA DESERT OPERATIONS (MODO ABA DEDICADA)")
+    logger.info("BOT AUTÔNOMO DE TROCAS PARA DESERT OPERATIONS")
     logger.info("=" * 50)
 
     opcoes = webdriver.ChromeOptions()
@@ -617,92 +573,76 @@ def principal():
 
     try:
         driver.get(URL_JOGO)
-        input("\n>>> Faça o login no jogo e pressione ENTER para iniciar o assistente...\n")
+        input("\n>>> Faça o login no jogo e pressione ENTER para iniciar o bot...\n")
 
         aba_original = abrir_e_focar_aba_premium(driver)
         if not aba_original:
-            logger.error("Falha na inicialização. Encerrando.")
             return
 
-        command_queue = queue.Queue()
-        input_thread = threading.Thread(target=user_input_thread, args=(command_queue,), daemon=True)
-        input_thread.start()
+        # --- FASE DE CONFIGURAÇÃO INICIAL (REQUISITO 1) ---
+        saldo_inicial = obter_saldo_diamantes(driver)
+        logger.info(f"Saldo atual de diamantes: {saldo_inicial:n}")
+        quantidade_padrao_de_troca = validar_entrada_numerica(
+            f"Defina a quantidade padrão de diamantes para usar em cada troca (Máx: {saldo_inicial:n}): ",
+            minimo=1,
+            maximo=saldo_inicial
+        )
+        if quantidade_padrao_de_troca is None:
+            logger.info("Nenhuma quantidade definida. Encerrando.")
+            return
 
-        # --- CORREÇÃO PRINCIPAL ESTÁ AQUI ---
-        # Envia um comando inicial para a fila para garantir que o painel seja exibido no início.
-        command_queue.put('show_panel')
-        # ------------------------------------
+        logger.info(f"Quantidade padrão definida para {quantidade_padrao_de_troca:n} diamantes por recurso.")
+        logger.info("Iniciando o primeiro ciclo do bot...")
 
-        last_refresh_time = time.time()
-        refresh_interval = random.randint(12 * 60, 15 * 60)
-        logger.info(f"Refresh automático agendado para daqui a aproximadamente {refresh_interval // 60} minutos.")
-
+        # --- LOOP DE CICLO AUTÔNOMO ---
+        ciclo_num = 1
         while True:
-            current_time = time.time()
-            if (current_time - last_refresh_time) > refresh_interval:
-                logger.info("=" * 50)
-                logger.info("TEMPO ESGOTADO! EXECUTANDO REFRESH AUTOMÁTICO...")
-                driver.refresh()
-                WebDriverWait(driver, 20).until(
-                    EC.presence_of_element_located((By.XPATH, "//img[@title='Dinheiro']"))
-                )
-                last_refresh_time = time.time()
-                refresh_interval = random.randint(12 * 60, 15 * 60)
-                logger.info(f"Refresh automático concluído. Próximo agendamento em ~{refresh_interval // 60} minutos.")
-                command_queue.put('show_panel')
+            logger.info("=" * 50)
+            logger.info(f"INICIANDO CICLO DE OPERAÇÃO Nº {ciclo_num}")
 
-            try:
-                command = command_queue.get_nowait()
-            except queue.Empty:
-                time.sleep(1)
-                continue
+            # 1. FASE DE ESPERA (REQUISITO 3)
+            logger.info("Verificando o temporizador para a próxima atualização de câmbio...")
+            _, segundos_restantes = obter_dados_da_tela(driver)
 
-            # O comando 'show_panel' (ou qualquer comando inválido) fará o painel ser reimpresso
-            if command == 'show_panel' or not command.isdigit():
-                saldo_diamantes = obter_saldo_diamantes(driver)
-                taxas_atuais, segundos_restantes = obter_dados_da_tela(driver)
+            if segundos_restantes > 0:
+                tempo_formatado = formatar_segundos(segundos_restantes)
+                logger.info(f"Aguardando {tempo_formatado} para a atualização das taxas...")
+                # Adiciona um buffer de 15s para garantir que o servidor atualizou
+                time.sleep(segundos_restantes + 15)
 
-                print("\n" + "=" * 50)
-                logger.info(f"Saldo de Diamantes: {saldo_diamantes:n}")
-                logger.info(f"Tempo para Próxima Atualização: {formatar_segundos(segundos_restantes)}")
-                print("-" * 50)
-                logger.info("Taxas de Câmbio (por 1 Diamante):")
-                for i, recurso in enumerate(RECURSOS):
-                    taxa = taxas_atuais.get(recurso, 0.0)
-                    print(f"  [{i + 1}] {recurso}: {int(taxa):n}  (Notação: {taxa:.2e})")
-                print("-" * 50)
-                print("Escolha uma ação:")
-                print(f"  [{len(RECURSOS) + 1}] Atualizar Taxas (Recarregar Aba Manualmente)")
-                print(f"  [{len(RECURSOS) + 2}] Sair")
-                continue
+            # 2. FASE DE ATUALIZAÇÃO
+            logger.info("Tempo esgotado. Recarregando a página para obter novas taxas...")
+            driver.refresh()
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.XPATH, "//img[@title='Dinheiro']"))
+            )
+            logger.info("Página atualizada com novas taxas de câmbio.")
 
-            escolha_num = int(command)
+            # 3. FASE DE TROCAS EM FILA (REQUISITO 2)
+            logger.info("-" * 50)
+            logger.info("Iniciando a fila de trocas automáticas...")
 
-            if escolha_num == len(RECURSOS) + 2:
-                logger.info("Encerrando o assistente...")
-                break
-            elif escolha_num == len(RECURSOS) + 1:
-                logger.info("Recarregando a aba manualmente para atualizar as taxas...")
-                driver.refresh()
-                WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.XPATH, "//img[@title='Dinheiro']")))
-                last_refresh_time = time.time()
-                command_queue.put('show_panel')
-            elif 1 <= escolha_num <= len(RECURSOS):
-                saldo_diamantes = obter_saldo_diamantes(driver)
-                recurso_escolhido = RECURSOS[escolha_num - 1]
-                quantidade = validar_entrada_numerica(
-                    f"Quantidade de diamantes para trocar por {recurso_escolhido} (Máx: {saldo_diamantes:n}): ",
-                    minimo=1, maximo=saldo_diamantes
-                )
-                if quantidade is not None:
-                    efetuar_troca_na_tela(driver, recurso_escolhido, quantidade)
-                    last_refresh_time = time.time()
+            for recurso in RECURSOS:
+                saldo_atual = obter_saldo_diamantes(driver)
+                if saldo_atual < quantidade_padrao_de_troca:
+                    logger.warning(
+                        f"Saldo de diamantes ({saldo_atual:n}) insuficiente para a troca de {quantidade_padrao_de_troca:n}. Encerrando fila de trocas deste ciclo.")
+                    break
+
+                if efetuar_troca_automatica(driver, recurso, quantidade_padrao_de_troca):
+                    # Pausa entre as trocas para não sobrecarregar o servidor
+                    time.sleep(random.randint(3, 7))
                 else:
-                    logger.info("Operação de troca cancelada.")
-                command_queue.put('show_panel')
+                    logger.error(f"Falha na troca por {recurso}. Pulando para o próximo recurso.")
+                    continue
 
+            logger.info("Fila de trocas do ciclo atual finalizada.")
+            ciclo_num += 1
+
+    except KeyboardInterrupt:
+        logger.info("Bot interrompido pelo usuário.")
     finally:
-        logger.info("Fechando o navegador.")
+        logger.info("Encerrando o bot...")
         if aba_original and len(driver.window_handles) > 1:
             try:
                 driver.close()
@@ -710,6 +650,7 @@ def principal():
             except Exception:
                 pass
         driver.quit()
+
 
 if __name__ == "__main__":
     principal()
