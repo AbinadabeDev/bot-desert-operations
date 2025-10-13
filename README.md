@@ -317,6 +317,6 @@ Este projeto está sob a licença MIT. Veja o arquivo [LICENSE](LICENSE) para ma
 
 **⭐ Se este projeto foi útil, considere dar uma estrela no repositório!**
 
-Desenvolvido com ❤️ e ☕ por [Seu Nome]
+Desenvolvido com ❤️ e ☕ por Abinadabe Oliveira
 
 </div>
