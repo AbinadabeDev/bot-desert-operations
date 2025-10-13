@@ -83,8 +83,6 @@ No Desert Operations, os jogadores precisam trocar diamantes (moeda premium) por
 git clone https://github.com/seu-usuario/bot-desert-operations.git
 cd bot-desert-operations
 
-text
-
 **2. Crie um ambiente virtual (recomendado)**
 
 Windows
